@@ -11,10 +11,11 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
+from PIL import Image
 
 # ─── Конфиг ───────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_СЮДА")
-OPENAI_KEY  = os.getenv("OPENAI_API_KEY", "ВСТАВЬТЕ_OPENAI_КЛЮЧ_СЮДА")
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "")
+OPENAI_KEY  = os.getenv("OPENAI_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://localhost:6379")
 SESSION_TTL = 3600  # секунды
 
@@ -32,6 +33,7 @@ TG_FILE= f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 # ═══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK ENDPOINT
 # ═══════════════════════════════════════════════════════════════════════════════
+
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
     """Принимает payload от n8n, отвечает 200 OK мгновенно, логику — в фоне."""
@@ -480,7 +482,7 @@ async def gpt_infographic_content(utp: str, style: str) -> dict:
 
 
 async def remove_background(photo_bytes: bytes) -> bytes:
-    """gpt-image-1: удаляет фон, возвращает PNG с прозрачностью."""
+    """gpt-image-1 HD: удаляет фон, возвращает PNG с прозрачностью."""
     resp = await openai.images.edit(
         model="gpt-image-1",
         image=("product.jpg", photo_bytes, "image/jpeg"),
@@ -492,8 +494,8 @@ async def remove_background(photo_bytes: bytes) -> bytes:
         ),
         n=1,
         size="1024x1024",
+        quality="hd",
     )
-    # Декодируем base64 результат
     img_data = resp.data[0].b64_json
     return base64.b64decode(img_data)
 
@@ -531,7 +533,7 @@ async def generate_infographic(
     index: int,
     series_mode: str,
 ) -> bytes:
-    """gpt-image-1: финальная инфографика."""
+    """gpt-image-1 HD: финальная инфографика с точным размером для маркетплейса."""
     w, h, margin = MP_SIZES[mp_key]
     mp_name      = MP_LABELS[mp_key]
 
@@ -559,14 +561,44 @@ async def generate_infographic(
         STYLE=style,
     ) + variation
 
+    # Генерируем в ближайшем поддерживаемом размере
+    if w > h:
+        gen_size = "1792x1024"
+    elif h > w:
+        gen_size = "1024x1792"
+    else:
+        gen_size = "1024x1024"
+
     resp = await openai.images.edit(
         model="gpt-image-1",
         image=("cutout.png", cutout_bytes, "image/png"),
         prompt=prompt.strip(),
         n=1,
-        size=f"{w}x{h}" if f"{w}x{h}" in ("1024x1024","1792x1024","1024x1792") else "1024x1024",
+        size=gen_size,
+        quality="hd",
     )
-    return base64.b64decode(resp.data[0].b64_json)
+    
+    # Декодируем результат
+    img_data = base64.b64decode(resp.data[0].b64_json)
+    
+    # Изменяем размер до точного размера маркетплейса и конвертируем в JPEG
+    img = Image.open(io.BytesIO(img_data))
+    img = img.resize((w, h), Image.LANCZOS)
+    
+    # Конвертируем в RGB (JPEG не поддерживает прозрачность)
+    if img.mode in ('RGBA', 'LA', 'P'):
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        if img.mode == 'P':
+            img = img.convert('RGBA')
+        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+        img = background
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    # Сохраняем в JPEG с высоким качеством
+    output = io.BytesIO()
+    img.save(output, format='JPEG', quality=95)
+    return output.getvalue()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -595,7 +627,7 @@ async def send_photo(token: str, chat_id: int, photo_bytes: bytes,
     data.add_field("chat_id", str(chat_id))
     data.add_field("caption", caption)
     data.add_field("photo", photo_bytes,
-                   filename="infographic.png", content_type="image/png")
+                   filename="infographic.jpg", content_type="image/jpeg")
 
     async with aiohttp.ClientSession() as s:
         async with s.post(f"https://api.telegram.org/bot{token}/sendPhoto",
@@ -611,7 +643,7 @@ async def send_media_group(token: str, chat_id: int,
     data.add_field("media", json.dumps(media))
     for name, img_bytes in files.items():
         data.add_field(name, img_bytes,
-                       filename=f"{name}.png", content_type="image/png")
+                       filename=f"{name}.jpg", content_type="image/jpeg")
 
     async with aiohttp.ClientSession() as s:
         async with s.post(f"https://api.telegram.org/bot{token}/sendMediaGroup",
