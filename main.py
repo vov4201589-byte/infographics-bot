@@ -35,6 +35,10 @@ TG_FILE= f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
+    import json
+    body = await request.json()
+    print("=== INCOMING REQUEST ===")
+    print(json.dumps(body, indent=2, ensure_ascii=False))
     """Принимает payload от n8n, отвечает 200 OK мгновенно, логику — в фоне."""
     try:
         payload   = await request.json()
