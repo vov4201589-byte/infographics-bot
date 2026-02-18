@@ -46,9 +46,6 @@ async def webhook(request: Request, bg: BackgroundTasks):
     except Exception as e:
         log.error(f"webhook parse error: {e}")
     return JSONResponse({"ok": True})
-    except Exception as e:
-        log.error(f"webhook parse error: {e}")
-    return JSONResponse({"ok": True})
 
 
 @app.get("/health")
