@@ -31,6 +31,112 @@ TG_FILE= f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ПРОМПТ АРТ-ДИРЕКТОРА ДЛЯ АНАЛИЗА ТОВАРА
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ART_DIRECTOR_PROMPT = """
+Ты — арт-директор маркетплейсов и генератор ТЗ для инфографики. 
+Я загружаю изображение товара. Твоя задача — по этой картинке сделать готовое ТЗ/промпт для генерации инфографики.
+
+1) АНАЛИЗ ИЗОБРАЖЕНИЯ
+- Определи: что за товар (категория + подвид), комплектацию (что входит), варианты/цвет (если видно).
+- Сними с изображения весь текст (OCR) и разложи по смыслу: характеристики, преимущества, гарантия, комплектация, ограничения.
+- Выяви структуру: где расположен товар, какой фон/цвета/стиль.
+
+2) КОНТЕНТ ИНФОГРАФИКИ
+- Составь заголовок (до 3–5 слов).
+- Выбери 4–6 ключевых УТП из того, что реально есть на картинке (ничего не выдумывать).
+- Для каждого УТП сделай:
+  * короткую строку (1–4 слова),
+  * уточнение (до 8–12 слов),
+  * подходящую иконку (описанием: "термометр", "капли воды", "лезвия", "Bluetooth", "батарея" и т.п.).
+- Если есть бейджи (гарантия, сертификация) — оформи как бейджи и укажи текст.
+
+3) СТИЛЬ НА ОСНОВЕ КАРТИНКИ
+Зафиксируй:
+- фон (описание + 2–3 варианта),
+- палитру (5–7 HEX цветов),
+- шрифтовые пары (геометрический гротеск для заголовка + простой гротеск для текста),
+- эффекты (свечение, металл, стекло, градиенты, тени),
+- общий тон (премиум/техно/зима/эко и т.д.).
+
+4) ВАЖНЫЕ ОГРАНИЧЕНИЯ
+- Не придумывай характеристики, цифры, гарантию, материалы — только то, что видно на изображении или в тексте на нём.
+- Если данных не хватает — предложи безопасные нейтральные формулировки ("подходит для…", "удобный дизайн") без цифр.
+- Не используй упоминания игр/брендов/сертификатов, если их нет на картинке.
+- Все тексты на русском, кроме общепринятых обозначений (DPI, mAh, RGB, Bluetooth, Type‑C и т.п.).
+
+Верни результат в формате JSON:
+{
+  "product_name": "название товара 3-5 слов",
+  "category": "категория товара",
+  "headline": "заголовок для инфографики 3-5 слов",
+  "utp_list": [
+    {
+      "short": "короткое УТП 1-4 слова",
+      "detail": "уточнение до 8-12 слов",
+      "icon": "описание иконки"
+    }
+  ],
+  "badges": ["текст бейджа 1", "текст бейджа 2"],
+  "style": {
+    "background": "описание фона",
+    "background_variants": ["вариант 1", "вариант 2", "вариант 3"],
+    "palette": ["#hex1", "#hex2", "#hex3", "#hex4", "#hex5"],
+    "tone": "общий тон (премиум/техно/эко и т.д.)",
+    "effects": "описание эффектов"
+  },
+  "text_zone": "top-left или top-right или bottom-left или bottom-right"
+}
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ИНФОГРАФИКИ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+INFOGRAPHIC_PROMPT_TEMPLATE = """
+Create a professional marketplace infographic card for {MP_NAME}.
+Canvas size: {W}x{H}px. Safe margins: {MARGIN}px on all sides.
+
+PRODUCT:
+- Product cutout is provided as input image — keep it exactly as-is, centered on canvas.
+- DO NOT redraw, modify, distort or replace the product.
+- Product should occupy 40-60% of the canvas area.
+
+LAYOUT for {MP_NAME} ({W}x{H}):
+- Text zone: {TEXT_ZONE} corner
+- Product position: opposite to text zone, occupying main visual space
+- Badge "{BADGE}" in contrasting corner (small, circular or shield shape)
+- 3-4 bullet points with small icons in the text zone
+- Leave 40px safe zone from all edges
+
+HEADLINE (Russian):
+{HEADLINE}
+
+УТП / BULLET POINTS (Russian, with icons):
+{UTP_FORMATTED}
+
+DESIGN STYLE:
+- Background: {BACKGROUND}
+- Color palette: {PALETTE}
+- Tone: {TONE}
+- Effects: {EFFECTS}
+- Typography: Bold geometric sans-serif for headline, clean sans-serif for body text
+- All text in Russian language
+- High contrast, readable text
+- Professional marketplace aesthetic
+
+STRICT REQUIREMENTS:
+- All text strictly inside canvas, within safe margins
+- No watermarks, no English text (except technical terms like RGB, USB, mAh)
+- No invented specifications or fake certifications
+- Clean commercial design
+- Product must remain exactly as provided, no modifications
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK ENDPOINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -98,7 +204,7 @@ async def dispatch(payload: dict, sess: dict, token: str, chat_id: int):
     # Маршрутизация по стадии
     handlers = {
         "await_photo":        step_photo,
-        "await_utp_approve":  step_utp_approve,
+        "await_analysis_approve": step_analysis_approve,
         "await_marketplace":  step_marketplace,
         "await_qty":          step_qty,
         "await_series":       step_series,
@@ -116,18 +222,22 @@ async def dispatch(payload: dict, sess: dict, token: str, chat_id: int):
 
 async def cmd_start(token: str, chat_id: int):
     text = (
-        "👋 Привет! Я генерирую инфографику для маркетплейсов.\n\n"
-        "📷 Пришлите фото товара — и я создам карточку для:\n"
-        "  • Wildberries (900×1200)\n"
-        "  • Ozon (1200×1600)\n"
-        "  • Яндекс.Маркет (800×800)\n\n"
+        "👋 Привет! Я — арт-директор маркетплейсов.\n\n"
+        "📷 Пришлите фото товара — и я:\n"
+        "  • Проанализирую товар и найду УТП\n"
+        "  • Составлю профессиональное ТЗ\n"
+        "  • Сгенерирую инфографику для:\n"
+        "    — Wildberries (900×1200)\n"
+        "    — Ozon (1200×1600)\n"
+        "    — Яндекс.Маркет (800×800)\n\n"
+        "🎨 Качество HD, формат JPEG\n\n"
         "Начнём? Пришлите фото товара 👇"
     )
     await send_msg(token, chat_id, text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ШАГ A — ФОТО
+# ШАГ A — ФОТО И АНАЛИЗ
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def step_photo(payload: dict, sess: dict, token: str, chat_id: int):
@@ -136,68 +246,66 @@ async def step_photo(payload: dict, sess: dict, token: str, chat_id: int):
         await send_msg(token, chat_id, "📷 Пожалуйста, пришлите *фото товара* (не файл, а картинку).", parse_mode="Markdown")
         return
 
-    await send_msg(token, chat_id, "🔍 Анализирую товар, определяю УТП...")
+    await send_msg(token, chat_id, "🔍 Анализирую товар как арт-директор...\n\n⏳ Определяю категорию, УТП, стиль и цвета...")
 
     try:
-        utp = await gpt_extract_utp(token, photo_id)
+        analysis = await gpt_analyze_product(token, photo_id)
     except Exception as e:
-        log.error(f"GPT UTP error: {e}")
+        log.error(f"GPT analysis error: {e}")
         await send_msg(token, chat_id, "❌ Не смог проанализировать фото. Попробуйте другое изображение.")
         return
 
     sess["photo_file_id"] = photo_id
-    sess["utp"]           = utp
-    sess["stage"]         = "await_utp_approve"
+    sess["analysis"]      = analysis
+    sess["stage"]         = "await_analysis_approve"
     await save_session(chat_id, sess)
 
+    # Форматируем результат анализа для пользователя
+    utp_text = "\n".join([f"  • {u['short']}: {u['detail']}" for u in analysis.get("utp_list", [])[:4]])
+    badges_text = ", ".join(analysis.get("badges", [])) or "—"
+    
+    message = (
+        f"📊 *Анализ завершён!*\n\n"
+        f"📦 *Товар:* {analysis.get('product_name', 'Товар')}\n"
+        f"📂 *Категория:* {analysis.get('category', '—')}\n\n"
+        f"🎯 *Заголовок:* {analysis.get('headline', '—')}\n\n"
+        f"💡 *УТП:*\n{utp_text}\n\n"
+        f"🏷 *Бейджи:* {badges_text}\n\n"
+        f"🎨 *Стиль:* {analysis.get('style', {}).get('tone', '—')}\n"
+        f"🖼 *Фон:* {analysis.get('style', {}).get('background', '—')}\n\n"
+        f"Всё верно?"
+    )
+
     kb = {"inline_keyboard": [[
-        {"text": "✅ Согласовать", "callback_data": "utp:ok"},
-        {"text": "✏️ Изменить",   "callback_data": "utp:edit"}
+        {"text": "✅ Согласовать", "callback_data": "analysis:ok"},
+        {"text": "🔄 Переанализировать", "callback_data": "analysis:retry"}
     ]]}
-    await send_msg(token, chat_id,
-        f"💡 УТП: *{utp}*\n\nСогласовать?",
-        parse_mode="Markdown", reply_markup=kb)
+    await send_msg(token, chat_id, message, parse_mode="Markdown", reply_markup=kb)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ШАГ B — УТП СОГЛАСОВАНИЕ
+# ШАГ B — СОГЛАСОВАНИЕ АНАЛИЗА
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def step_utp_approve(payload: dict, sess: dict, token: str, chat_id: int):
-    cb   = payload.get("callbackData", "")
-    text = payload.get("text", "").strip()
+async def step_analysis_approve(payload: dict, sess: dict, token: str, chat_id: int):
+    cb = payload.get("callbackData", "")
 
-    if cb == "utp:ok":
+    if cb == "analysis:ok":
         sess["stage"] = "await_marketplace"
         await save_session(chat_id, sess)
         await ask_marketplace(token, chat_id)
 
-    elif cb == "utp:edit":
-        sess["stage"] = "await_utp_approve"
-        sess["utp_editing"] = True
+    elif cb == "analysis:retry":
+        sess["stage"] = "await_photo"
         await save_session(chat_id, sess)
-        await send_msg(token, chat_id, "✏️ Введите УТП (2–3 слова, без кавычек):")
-
-    elif sess.get("utp_editing") and text:
-        words = text.split()
-        if len(words) < 2 or len(words) > 3:
-            await send_msg(token, chat_id, "⚠️ Нужно ровно 2–3 слова. Попробуйте ещё раз:")
-            return
-        sess["utp"]         = text
-        sess["utp_editing"] = False
-        sess["stage"]       = "await_marketplace"
-        await save_session(chat_id, sess)
-        await send_msg(token, chat_id, f"✅ УТП сохранено: *{text}*", parse_mode="Markdown")
-        await ask_marketplace(token, chat_id)
+        await send_msg(token, chat_id, "📷 Пришлите фото товара ещё раз — проанализирую заново.")
 
     else:
         kb = {"inline_keyboard": [[
-            {"text": "✅ Согласовать", "callback_data": "utp:ok"},
-            {"text": "✏️ Изменить",   "callback_data": "utp:edit"}
+            {"text": "✅ Согласовать", "callback_data": "analysis:ok"},
+            {"text": "🔄 Переанализировать", "callback_data": "analysis:retry"}
         ]]}
-        await send_msg(token, chat_id,
-            f"💡 УТП: *{sess.get('utp','?')}*\n\nСогласовать?",
-            parse_mode="Markdown", reply_markup=kb)
+        await send_msg(token, chat_id, "Подтвердите анализ или запросите повторный:", reply_markup=kb)
 
 
 async def ask_marketplace(token: str, chat_id: int):
@@ -230,7 +338,7 @@ async def step_marketplace(payload: dict, sess: dict, token: str, chat_id: int):
 
     mp_label = MP_NAMES[mp_key]
     await send_msg(token, chat_id,
-        f"✅ Выбрано: *{mp_label}*\n\n🔢 Сколько картинок сгенерировать?\nНапишите цифрой (1–10):",
+        f"✅ Выбрано: *{mp_label}*\n\n🔢 Сколько вариантов дизайна сгенерировать?\nНапишите цифрой (1–5):",
         parse_mode="Markdown")
 
 
@@ -242,10 +350,10 @@ async def step_qty(payload: dict, sess: dict, token: str, chat_id: int):
     text = payload.get("text", "").strip()
     try:
         qty = int(text)
-        if qty < 1 or qty > 10:
+        if qty < 1 or qty > 5:
             raise ValueError
     except ValueError:
-        await send_msg(token, chat_id, "⚠️ Введите целое число от 1 до 10:")
+        await send_msg(token, chat_id, "⚠️ Введите целое число от 1 до 5:")
         return
 
     sess["qty"]   = qty
@@ -258,16 +366,20 @@ async def step_qty(payload: dict, sess: dict, token: str, chat_id: int):
 
     if qty > 1:
         kb = {"inline_keyboard": [[
-            {"text": "🔁 Одинаковая серия",  "callback_data": "mode:series"},
-            {"text": "🎲 Каждое разное",     "callback_data": "mode:different"},
+            {"text": "🔁 Единая серия",  "callback_data": "mode:series"},
+            {"text": "🎲 Разные стили",  "callback_data": "mode:different"},
         ]]}
         await send_msg(token, chat_id,
-            f"✅ Количество: *{qty}*{note}\n\nГенерировать в одном стиле или каждое разное?",
+            f"✅ Количество: *{qty}*{note}\n\nГенерировать в едином стиле или с разными вариациями?",
             parse_mode="Markdown", reply_markup=kb)
     else:
-        await send_msg(token, chat_id,
-            f"✅ Количество: *{qty}*{note}\n\n🎨 В каком цветовом стиле делать фон?\n_(например: пастельные тона, тёмный минимализм, яркий неон)_",
-            parse_mode="Markdown")
+        # Используем стиль из анализа
+        analysis = sess.get("analysis", {})
+        style_tone = analysis.get("style", {}).get("tone", "современный минимализм")
+        sess["style"] = style_tone
+        sess["stage"] = "generating"
+        await save_session(chat_id, sess)
+        await start_generation(sess, token, chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -278,19 +390,33 @@ async def step_series(payload: dict, sess: dict, token: str, chat_id: int):
     cb = payload.get("callbackData", "")
     if cb not in ("mode:series", "mode:different"):
         kb = {"inline_keyboard": [[
-            {"text": "🔁 Одинаковая серия",  "callback_data": "mode:series"},
-            {"text": "🎲 Каждое разное",     "callback_data": "mode:different"},
+            {"text": "🔁 Единая серия",  "callback_data": "mode:series"},
+            {"text": "🎲 Разные стили",  "callback_data": "mode:different"},
         ]]}
         await send_msg(token, chat_id, "Выберите режим:", reply_markup=kb)
         return
 
-    sess["series_mode"] = cb.split(":")[1]   # "series" или "different"
+    sess["series_mode"] = cb.split(":")[1]
     sess["stage"]       = "await_style"
     await save_session(chat_id, sess)
 
+    # Предлагаем варианты стиля из анализа
+    analysis = sess.get("analysis", {})
+    style_info = analysis.get("style", {})
+    bg_variants = style_info.get("background_variants", ["светлый градиент", "тёмный премиум", "яркий акцент"])
+    
+    kb = {"inline_keyboard": [
+        [{"text": f"🎨 {bg_variants[0]}", "callback_data": "style:0"}],
+        [{"text": f"🎨 {bg_variants[1]}", "callback_data": "style:1"}] if len(bg_variants) > 1 else [],
+        [{"text": f"🎨 {bg_variants[2]}", "callback_data": "style:2"}] if len(bg_variants) > 2 else [],
+        [{"text": "✏️ Свой вариант", "callback_data": "style:custom"}],
+    ]}
+    # Убираем пустые строки
+    kb["inline_keyboard"] = [row for row in kb["inline_keyboard"] if row]
+    
     await send_msg(token, chat_id,
-        "🎨 В каком цветовом стиле делать фон?\n_(например: пастельные тона, тёмный минимализм, яркий неон)_",
-        parse_mode="Markdown")
+        f"🎨 Выберите стиль фона или опишите свой:",
+        reply_markup=kb)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -298,25 +424,51 @@ async def step_series(payload: dict, sess: dict, token: str, chat_id: int):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def step_style(payload: dict, sess: dict, token: str, chat_id: int):
-    style = payload.get("text", "").strip()
-    if not style:
-        await send_msg(token, chat_id, "🎨 Напишите стиль фона (любым текстом):")
+    cb = payload.get("callbackData", "")
+    text = payload.get("text", "").strip()
+    
+    analysis = sess.get("analysis", {})
+    style_info = analysis.get("style", {})
+    bg_variants = style_info.get("background_variants", ["светлый градиент", "тёмный премиум", "яркий акцент"])
+    
+    if cb.startswith("style:"):
+        style_idx = cb.split(":")[1]
+        if style_idx == "custom":
+            sess["awaiting_custom_style"] = True
+            await save_session(chat_id, sess)
+            await send_msg(token, chat_id, "✏️ Опишите желаемый стиль фона:")
+            return
+        else:
+            idx = int(style_idx)
+            style = bg_variants[idx] if idx < len(bg_variants) else bg_variants[0]
+    elif sess.get("awaiting_custom_style") and text:
+        style = text
+        sess["awaiting_custom_style"] = False
+    elif text:
+        style = text
+    else:
+        await send_msg(token, chat_id, "🎨 Выберите или опишите стиль фона:")
         return
 
     sess["style"] = style
     sess["stage"] = "generating"
     await save_session(chat_id, sess)
+    
+    await start_generation(sess, token, chat_id)
 
+
+async def start_generation(sess: dict, token: str, chat_id: int):
     qty     = sess.get("qty", 1)
     mp_mode = sess.get("mp_mode", "wb")
     total   = qty * 3 if mp_mode == "all" else qty
 
     await send_msg(token, chat_id,
-        f"⚙️ Начинаю генерацию *{total}* {'картинки' if total < 5 else 'картинок'}...\n\n"
-        f"Это займёт ~{total * 30}–{total * 50} секунд. Ожидайте 🕐",
+        f"⚙️ Запускаю генерацию *{total}* {'картинки' if total == 1 else 'картинок'} в HD качестве...\n\n"
+        f"🎨 Стиль: {sess.get('style', 'авто')}\n"
+        f"📐 Формат: JPEG\n\n"
+        f"⏳ Это займёт ~{total * 30}–{total * 60} секунд. Ожидайте 🕐",
         parse_mode="Markdown")
 
-    # Запускаем генерацию в отдельной задаче
     asyncio.create_task(run_generation(sess.copy(), token, chat_id))
 
 
@@ -329,9 +481,9 @@ async def step_generating(payload: dict, sess: dict, token: str, chat_id: int):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MP_SIZES = {
-    "wb":   (900,  1200, 60),
-    "ozon": (1200, 1600, 80),
-    "ym":   (800,  800,  50),
+    "wb":   (900,  1200, 40),
+    "ozon": (1200, 1600, 40),
+    "ym":   (800,  800,  40),
 }
 MP_LABELS = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Маркет"}
 
@@ -339,41 +491,37 @@ MP_LABELS = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Марке
 async def run_generation(sess: dict, token: str, chat_id: int):
     try:
         photo_id    = sess["photo_file_id"]
-        utp         = sess["utp"]
+        analysis    = sess["analysis"]
         mp_list     = sess["mp"]
         qty         = sess.get("qty", 1)
-        style       = sess.get("style", "светлый минималистичный")
+        style       = sess.get("style", "современный минимализм")
         series_mode = sess.get("series_mode", "series")
 
-        # 1. GPT-4o: получаем JSON с контентом инфографики
-        log.info(f"[{chat_id}] Запрашиваем контент у GPT-4o")
-        content_json = await gpt_infographic_content(utp, style)
-
-        # 2. Скачиваем фото и удаляем фон
+        # 1. Скачиваем фото и удаляем фон
         log.info(f"[{chat_id}] Скачиваем фото и удаляем фон")
         photo_bytes = await download_tg_photo(token, photo_id)
         cutout_bytes = await remove_background(photo_bytes)
 
-        # 3. Генерируем картинки для каждого МП
-        all_media = []   # [(bytes, mp_key), ...]
+        # 2. Генерируем картинки для каждого МП
+        all_media = []
 
         for mp_key in mp_list:
             for i in range(qty):
                 log.info(f"[{chat_id}] Генерируем {mp_key} #{i+1}/{qty}")
 
-                vary = (series_mode == "different") or (i == 0 and series_mode == "series")
                 img_bytes = await generate_infographic(
-                    cutout_bytes, content_json, mp_key, style, i, series_mode
+                    cutout_bytes, analysis, mp_key, style, i, series_mode
                 )
                 all_media.append((img_bytes, mp_key, i + 1))
 
-        # 4. Отправляем пользователю
+        # 3. Отправляем пользователю
         await send_results(token, chat_id, all_media, mp_list, qty)
 
-        # 5. Сбрасываем сессию
+        # 4. Сбрасываем сессию
         await save_session(chat_id, {"stage": "await_photo"})
         await send_msg(token, chat_id,
-            "✅ Готово! Пришлите новое фото для следующего товара 📷")
+            "✅ Готово! Все картинки в HD качестве, формат JPEG.\n\n"
+            "📷 Пришлите новое фото для следующего товара.")
 
     except Exception as e:
         log.error(f"[{chat_id}] generation error: {e}", exc_info=True)
@@ -388,8 +536,9 @@ async def send_results(token: str, chat_id: int,
 
     if len(all_media) == 1:
         img_bytes, mp_key, _ = all_media[0]
+        w, h, _ = MP_SIZES[mp_key]
         await send_photo(token, chat_id, img_bytes,
-                         caption=f"📦 {MP_LABELS[mp_key]}")
+                         caption=f"📦 {MP_LABELS[mp_key]} ({w}×{h})")
         return
 
     # Группируем по маркетплейсу
@@ -398,19 +547,20 @@ async def send_results(token: str, chat_id: int,
         by_mp.setdefault(mp_key, []).append((img_bytes, idx))
 
     for mp_key, items in by_mp.items():
+        w, h, _ = MP_SIZES[mp_key]
         if len(items) == 1:
             await send_photo(token, chat_id, items[0][0],
-                             caption=f"📦 {MP_LABELS[mp_key]}")
+                             caption=f"📦 {MP_LABELS[mp_key]} ({w}×{h})")
         else:
             media_group = []
             for i, (img_bytes, idx) in enumerate(items):
-                caption = f"📦 {MP_LABELS[mp_key]} #{idx}" if i == 0 else ""
+                caption = f"📦 {MP_LABELS[mp_key]} #{idx} ({w}×{h})" if i == 0 else ""
                 media_group.append({
                     "type":    "photo",
-                    "media":   f"attach://photo_{idx}",
+                    "media":   f"attach://photo_{mp_key}_{idx}",
                     "caption": caption,
                 })
-            files = {f"photo_{idx}": img_bytes for _, idx in items}
+            files = {f"photo_{mp_key}_{idx}": img_bytes for img_bytes, idx in items}
             await send_media_group(token, chat_id, media_group, files)
 
 
@@ -418,8 +568,8 @@ async def send_results(token: str, chat_id: int,
 # GPT ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def gpt_extract_utp(token: str, file_id: str) -> str:
-    """GPT-4o vision: извлекает УТП товара (2–3 слова на русском)."""
+async def gpt_analyze_product(token: str, file_id: str) -> dict:
+    """GPT-4o vision: полный анализ товара как арт-директор."""
     photo_bytes = await download_tg_photo(token, file_id)
     b64 = base64.b64encode(photo_bytes).decode()
 
@@ -434,48 +584,11 @@ async def gpt_extract_utp(token: str, file_id: str) -> str:
                 },
                 {
                     "type": "text",
-                    "text": (
-                        "Определи главное УТП (уникальное торговое предложение) этого товара. "
-                        "Ответь ТОЛЬКО 2–3 словами на русском языке. "
-                        "Без кавычек, без точек, без эмодзи, без названия бренда/модели. "
-                        "Пример хорошего ответа: лёгкое и удобное"
-                    )
+                    "text": ART_DIRECTOR_PROMPT
                 }
             ]
         }],
-        max_tokens=20,
-    )
-    return resp.choices[0].message.content.strip()
-
-
-async def gpt_infographic_content(utp: str, style: str) -> dict:
-    """GPT-4o: генерирует структуру контента инфографики."""
-    prompt = f"""
-Ты дизайнер инфографики для маркетплейсов. Сгенерируй JSON для карточки товара.
-УТП товара: "{utp}"
-Стиль фона: "{style}"
-
-Верни ТОЛЬКО валидный JSON без комментариев:
-{{
-  "utp": "финальное УТП 2-3 слова",
-  "bullets": ["2-4 слова", "2-4 слова", "2-4 слова"],
-  "badge": "Новинка",
-  "text_zone": "top-left",
-  "palette": ["#hex1", "#hex2", "#hex3"],
-  "icon_style": "одна фраза про стиль иконок",
-  "background_notes": "одна фраза про фон"
-}}
-
-Правила:
-- bullets: 2-3 штуки, короткие (2-4 слова), без цифр-обещаний
-- palette: 3-5 hex цветов, гармоничные, подходящие к стилю "{style}"
-- badge всегда "Новинка"
-- text_zone: top-left, top-right, bottom-left или bottom-right
-"""
-    resp = await openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
+        max_tokens=1500,
         response_format={"type": "json_object"},
     )
     return json.loads(resp.choices[0].message.content)
@@ -487,10 +600,10 @@ async def remove_background(photo_bytes: bytes) -> bytes:
         model="gpt-image-1",
         image=("product.jpg", photo_bytes, "image/jpeg"),
         prompt=(
-            "Remove the background and return a clean transparent PNG with alpha channel. "
+            "Remove the background completely and return a clean transparent PNG with alpha channel. "
             "Keep product fully visible, centered, not cropped. "
-            "Preserve original colors and all details. "
-            "No shadows, no new background, no artifacts."
+            "Preserve original colors, lighting and all details exactly. "
+            "No shadows, no new background, no artifacts, no modifications to the product."
         ),
         n=1,
         size="1024x1024",
@@ -500,34 +613,9 @@ async def remove_background(photo_bytes: bytes) -> bytes:
     return base64.b64decode(img_data)
 
 
-MP_PROMPT_TEMPLATE = """
-Create a professional marketplace infographic card for {MP_NAME}.
-Canvas size: {W}x{H}px. Safe margins: {MARGIN}px on all sides.
-
-Product cutout is provided as input image — keep it exactly as-is, centered on canvas.
-DO NOT redraw, modify, distort or replace the product.
-
-Layout:
-- Text zone: {TEXT_ZONE} corner
-- Badge "Новинка" in contrasting corner
-- 2-3 bullet points with small icons (generate icons that match: {ICON_STYLE})
-
-Typography & text (all in Russian):
-- Main headline: {UTP}
-- Bullets: {BULLETS}
-
-Design:
-- Color palette: {PALETTE}
-- Background style: {BACKGROUND_NOTES}, {STYLE}
-- Clean commercial design, no watermarks, no English text
-- All text strictly inside canvas, within safe margins
-- Professional marketplace product card aesthetic
-"""
-
-
 async def generate_infographic(
     cutout_bytes: bytes,
-    content: dict,
+    analysis: dict,
     mp_key: str,
     style: str,
     index: int,
@@ -537,28 +625,53 @@ async def generate_infographic(
     w, h, margin = MP_SIZES[mp_key]
     mp_name      = MP_LABELS[mp_key]
 
-    bullets_str  = " | ".join(content.get("bullets", []))
-    palette_str  = ", ".join(content.get("palette", ["#ffffff", "#000000"]))
+    # Извлекаем данные из анализа
+    headline = analysis.get("headline", analysis.get("product_name", "Товар"))
+    utp_list = analysis.get("utp_list", [])
+    badges = analysis.get("badges", ["Новинка"])
+    style_info = analysis.get("style", {})
+    
+    # Форматируем УТП для промпта
+    utp_formatted = "\n".join([
+        f"- {u['short']}: {u['detail']} (icon: {u['icon']})"
+        for u in utp_list[:4]
+    ])
+    
+    # Палитра и эффекты
+    palette = ", ".join(style_info.get("palette", ["#ffffff", "#000000", "#333333"]))
+    background = style_info.get("background", style)
+    tone = style_info.get("tone", "современный")
+    effects = style_info.get("effects", "чистый минимализм")
+    text_zone = analysis.get("text_zone", "top-left")
+    badge_text = badges[0] if badges else "Новинка"
 
-    # Для mode:different меняем акцент в промпте
+    # Для mode:different меняем вариации
     variation = ""
     if series_mode == "different" and index > 0:
+        bg_variants = style_info.get("background_variants", [])
+        if index < len(bg_variants):
+            background = bg_variants[index]
         variations = [
-            "Use completely different background composition and shapes.",
-            "Flip layout — move text zone to opposite side, change background geometry.",
-            "Use diagonal layout, bold geometric background elements.",
+            "Use different background composition with geometric shapes.",
+            "Flip layout — move text zone to opposite side.",
+            "Use diagonal dynamic layout with bold accents.",
+            "Minimalist version with more whitespace.",
         ]
-        variation = variations[index % len(variations)]
+        variation = f"\n\nVARIATION: {variations[index % len(variations)]}"
 
-    prompt = MP_PROMPT_TEMPLATE.format(
-        MP_NAME=mp_name, W=w, H=h, MARGIN=margin,
-        TEXT_ZONE=content.get("text_zone", "top-left"),
-        UTP=content.get("utp", ""),
-        BULLETS=bullets_str,
-        PALETTE=palette_str,
-        ICON_STYLE=content.get("icon_style", "flat minimal"),
-        BACKGROUND_NOTES=content.get("background_notes", "clean gradient"),
-        STYLE=style,
+    prompt = INFOGRAPHIC_PROMPT_TEMPLATE.format(
+        MP_NAME=mp_name, 
+        W=w, 
+        H=h, 
+        MARGIN=margin,
+        TEXT_ZONE=text_zone,
+        HEADLINE=headline,
+        UTP_FORMATTED=utp_formatted,
+        BADGE=badge_text,
+        BACKGROUND=background,
+        PALETTE=palette,
+        TONE=tone,
+        EFFECTS=effects,
     ) + variation
 
     # Генерируем в ближайшем поддерживаемом размере
@@ -587,11 +700,11 @@ async def generate_infographic(
     
     # Конвертируем в RGB (JPEG не поддерживает прозрачность)
     if img.mode in ('RGBA', 'LA', 'P'):
-        background = Image.new('RGB', img.size, (255, 255, 255))
+        background_img = Image.new('RGB', img.size, (255, 255, 255))
         if img.mode == 'P':
             img = img.convert('RGBA')
-        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-        img = background
+        background_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+        img = background_img
     elif img.mode != 'RGB':
         img = img.convert('RGB')
     
