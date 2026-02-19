@@ -798,3 +798,5 @@ async def delete_session(chat_id: int):
         await r.close()
     except Exception as e:
         log.error(f"delete_session error: {e}")
+
+
