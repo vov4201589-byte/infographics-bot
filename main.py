@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 
 app    = FastAPI()
 openai = AsyncOpenAI(api_key=OPENAI_KEY)
-redis  = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -190,11 +189,13 @@ async def gpt_analyze_strategies(photo_bytes: bytes) -> list:
 Примеры стратегий: "Элитный Интерьер", "Природный Лайфстайл", "Техно-Креатив", "Уличный Стиль", "Минимализм-Люкс"
 
 Верни ТОЛЬКО валидный JSON без комментариев:
-[
-  {"title": "...", "strategy": "...", "marketing_hook": "..."},
-  {"title": "...", "strategy": "...", "marketing_hook": "..."},
-  {"title": "...", "strategy": "...", "marketing_hook": "..."}
-]"""
+{
+  "strategies": [
+    {"title": "...", "strategy": "...", "marketing_hook": "..."},
+    {"title": "...", "strategy": "...", "marketing_hook": "..."},
+    {"title": "...", "strategy": "...", "marketing_hook": "..."}
+  ]
+}"""
                 }
             ]
         }],
@@ -203,14 +204,17 @@ async def gpt_analyze_strategies(photo_bytes: bytes) -> list:
     )
     
     result = json.loads(resp.choices[0].message.content)
-    # GPT может вернуть объект с ключом strategies или просто массив
-    if isinstance(result, dict) and "strategies" in result:
+    if "strategies" in result:
         return result["strategies"]
     elif isinstance(result, list):
         return result
     else:
-        # Fallback
-        return result.get("data", [])
+        # Fallback если структура другая
+        return [
+            {"title": "Элитный", "strategy": "Премиум товар для ценителей", "marketing_hook": "Выбор профи"},
+            {"title": "Практичный", "strategy": "Надёжность на каждый день", "marketing_hook": "Просто работает"},
+            {"title": "Стильный", "strategy": "Модный дизайн", "marketing_hook": "Будь в тренде"}
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -288,19 +292,22 @@ async def gpt_create_background_prompts(strategy: dict) -> list[str]:
 - "Minimalist scandinavian room, white walls, plants, natural daylight, high detail"
 
 Верни ТОЛЬКО JSON массив из 3 промптов:
-["prompt1", "prompt2", "prompt3"]"""
+{{"prompts": ["prompt1", "prompt2", "prompt3"]}}"""
         }],
         max_tokens=300,
         response_format={"type": "json_object"}
     )
     
     result = json.loads(resp.choices[0].message.content)
-    if isinstance(result, dict) and "prompts" in result:
+    if "prompts" in result:
         return result["prompts"][:3]
-    elif isinstance(result, list):
-        return result[:3]
     else:
-        return list(result.values())[:3]
+        # Fallback
+        return [
+            "Luxury interior with marble and gold, soft studio lighting, 8k",
+            "Modern minimalist setting, white background, professional photography",
+            "Natural outdoor scene, bokeh background, golden hour lighting"
+        ]
 
 
 async def krea_generate_previews(prompts: list[str]) -> list[str]:
@@ -309,23 +316,34 @@ async def krea_generate_previews(prompts: list[str]) -> list[str]:
     
     async with aiohttp.ClientSession() as session:
         for prompt in prompts:
-            async with session.post(
-                "https://api.krea.ai/v1/images/generations",
-                headers={
-                    "Authorization": f"Bearer {KREA_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "prompt": prompt,
-                    "model": "krea-flash",  # быстрая модель для превью
-                    "width": 512,
-                    "height": 512,
-                    "steps": 4  # минимум шагов для скорости
-                }
-            ) as resp:
-                data = await resp.json()
-                preview_urls.append(data["images"][0]["url"])
-                await asyncio.sleep(0.5)
+            try:
+                async with session.post(
+                    "https://api.krea.ai/v1/images/generations",
+                    headers={
+                        "Authorization": f"Bearer {KREA_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "prompt": prompt,
+                        "model": "krea-flash",
+                        "width": 512,
+                        "height": 512,
+                        "steps": 4
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        preview_urls.append(data["images"][0]["url"])
+                    else:
+                        log.error(f"Krea preview error: {await resp.text()}")
+                        # Fallback: используем заглушку
+                        preview_urls.append("https://via.placeholder.com/512?text=Preview")
+            except Exception as e:
+                log.error(f"Krea preview exception: {e}")
+                preview_urls.append("https://via.placeholder.com/512?text=Error")
+            
+            await asyncio.sleep(0.5)
     
     return preview_urls
 
@@ -460,7 +478,6 @@ async def run_generation(sess: dict, token: str, chat_id: int):
         qty         = sess.get("qty", 1)
         series_mode = sess.get("series_mode", "series")
 
-        # Скачиваем фото
         photo_bytes = await download_tg_photo(token, photo_id)
 
         all_media = []
@@ -484,7 +501,6 @@ async def run_generation(sess: dict, token: str, chat_id: int):
 
                 all_media.append((final_bytes, mp_key, i + 1))
 
-        # Отправляем результаты
         await send_results(token, chat_id, all_media, mp_list, qty)
 
         await save_session(chat_id, {"stage": "await_photo"})
@@ -505,10 +521,7 @@ async def krea_background_generation(
     background_prompt: str,
     mp_key: str
 ) -> bytes:
-    """
-    Шаг 3: Krea вырезает товар и вплавляет его в фон.
-    Создаёт физически корректные тени и отражения.
-    """
+    """Шаг 3: Krea вырезает товар и вплавляет его в фон"""
     w, h, _ = MP_SIZES[mp_key]
 
     async with aiohttp.ClientSession() as session:
@@ -517,36 +530,32 @@ async def krea_background_generation(
         form.add_field("prompt", background_prompt)
         form.add_field("width", str(w))
         form.add_field("height", str(h))
-        form.add_field("model", "krea-pro")  # полная модель
+        form.add_field("model", "krea-pro")
         form.add_field("steps", "20")
 
         async with session.post(
             "https://api.krea.ai/v1/images/background-generation",
             headers={"Authorization": f"Bearer {KREA_API_KEY}"},
-            data=form
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=60)
         ) as resp:
             if resp.status != 200:
                 raise Exception(f"Krea API error: {await resp.text()}")
             data = await resp.json()
             
-            # Ждём результата если нужно
             if "id" in data:
                 result = await _wait_for_krea_result(session, data["id"])
                 return result
             else:
-                # Если сразу вернули URL
                 image_url = data["images"][0]["url"]
                 async with session.get(image_url) as img_resp:
                     return await img_resp.read()
 
 
 async def krea_enhance(image_bytes: bytes, mp_key: str) -> bytes:
-    """
-    Шаг 4: Krea Enhancer увеличивает до 4K и добавляет гиперреализм.
-    Это ключевой этап "WOW".
-    """
+    """Шаг 4: Krea Enhancer увеличивает до 4K и добавляет гиперреализм"""
     w, h, _ = MP_SIZES[mp_key]
-    target_w = w * 2  # апскейл 2x
+    target_w = w * 2
     target_h = h * 2
 
     async with aiohttp.ClientSession() as session:
@@ -554,12 +563,13 @@ async def krea_enhance(image_bytes: bytes, mp_key: str) -> bytes:
         form.add_field("image", image_bytes, filename="input.png")
         form.add_field("width", str(target_w))
         form.add_field("height", str(target_h))
-        form.add_field("enhance_level", "high")  # максимальное улучшение
+        form.add_field("enhance_level", "high")
 
         async with session.post(
             "https://api.krea.ai/v1/images/enhance",
             headers={"Authorization": f"Bearer {KREA_API_KEY}"},
-            data=form
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=60)
         ) as resp:
             if resp.status != 200:
                 raise Exception(f"Krea Enhance error: {await resp.text()}")
@@ -607,12 +617,10 @@ async def add_infographic_overlay(
     draw = ImageDraw.Draw(img)
     
     w, h, margin = MP_SIZES[mp_key]
-    # Если изображение после Krea Enhance больше — ресайзим
     if img.size != (w, h):
         img = img.resize((w, h), Image.Resampling.LANCZOS)
         draw = ImageDraw.Draw(img)
     
-    # Загружаем шрифты
     try:
         font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
         font_body  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 36)
@@ -620,24 +628,19 @@ async def add_infographic_overlay(
         font_title = ImageFont.load_default()
         font_body  = ImageFont.load_default()
     
-    # Marketing hook (главный текст)
     hook = strategy["marketing_hook"]
     
-    # Позиция текста (top-left)
     x_text = margin + 30
     y_text = margin + 30
     
-    # Плашка под текстом
     bbox = draw.textbbox((x_text, y_text), hook, font=font_title)
     draw.rectangle(
         [bbox[0] - 20, bbox[1] - 15, bbox[2] + 20, bbox[3] + 15],
         fill=(255, 255, 255, 230)
     )
     
-    # Текст
     draw.text((x_text, y_text), hook, fill=(0, 0, 0), font=font_title)
     
-    # Бейдж "Новинка"
     badge_x = w - margin - 180
     badge_y = margin + 30
     draw.rectangle(
@@ -646,7 +649,6 @@ async def add_infographic_overlay(
     )
     draw.text((badge_x + 20, badge_y + 15), "НОВИНКА", fill=(255, 255, 255), font=font_body)
     
-    # Сохраняем
     output = io.BytesIO()
     img.save(output, format="PNG", quality=95)
     return output.getvalue()
@@ -662,7 +664,6 @@ async def send_results(token: str, chat_id: int, all_media: list, mp_list: list,
         await send_photo(token, chat_id, img_bytes, caption=f"📦 {MP_LABELS[mp_key]}")
         return
 
-    # Группируем по МП
     by_mp = {}
     for img_bytes, mp_key, idx in all_media:
         by_mp.setdefault(mp_key, []).append((img_bytes, idx))
@@ -757,25 +758,43 @@ async def download_tg_photo(token: str, file_id: str) -> bytes:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# REDIS
+# REDIS (с reconnect logic)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def get_redis():
+    """Получает Redis соединение с retry logic"""
+    try:
+        return await aioredis.from_url(REDIS_URL, decode_responses=True)
+    except Exception as e:
+        log.error(f"Redis connection error: {e}")
+        await asyncio.sleep(0.5)
+        return await aioredis.from_url(REDIS_URL, decode_responses=True)
+
+
 async def load_session(chat_id: int) -> dict:
-    raw = await redis.get(f"session:{chat_id}")
-    return json.loads(raw) if raw else {"stage": "await_photo"}
+    try:
+        r = await get_redis()
+        raw = await r.get(f"session:{chat_id}")
+        await r.close()
+        return json.loads(raw) if raw else {"stage": "await_photo"}
+    except Exception as e:
+        log.error(f"load_session error: {e}")
+        return {"stage": "await_photo"}
 
 
 async def save_session(chat_id: int, sess: dict):
-    await redis.setex(f"session:{chat_id}", SESSION_TTL, json.dumps(sess))
+    try:
+        r = await get_redis()
+        await r.setex(f"session:{chat_id}", SESSION_TTL, json.dumps(sess))
+        await r.close()
+    except Exception as e:
+        log.error(f"save_session error: {e}")
 
 
 async def delete_session(chat_id: int):
-    await redis.delete(f"session:{chat_id}")
-
-
-
-
-
-
-
-
+    try:
+        r = await get_redis()
+        await r.delete(f"session:{chat_id}")
+        await r.close()
+    except Exception as e:
+        log.error(f"delete_session error: {e}")
