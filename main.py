@@ -1,7 +1,4 @@
 """
-Telegram Infographics Bot — Updated with Krea AI Pipeline
-5 шагов: GPT-4o → Krea Previews → Krea Gen → Krea Enhancer → PIL
-"""
 
 import os, json, asyncio, base64, io, logging
 from typing import Optional
